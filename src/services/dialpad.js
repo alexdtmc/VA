@@ -1,147 +1,80 @@
 const axios = require('axios');
-const config = require('../../config');
-const jwt = require('jsonwebtoken');
-
-// Correct API URL
-const DIALPAD_API_BASE = config.dialpad.apiBase || 'https://dialpad.com/api/v2';
+const config = require('../config'); // Ensure this file exists as shown above
 
 /**
- * Validate webhook signature
+ * Answer an incoming call via the Dialpad API.
+ * @param {number|string} callId - The ID of the call to answer.
+ * @param {string} [baseUrl=config.dialpad.apiBase] - The base URL for the API.
+ * @returns {Promise<object>} - An object indicating success or failure.
  */
-function validateWebhookSignature(payload, signature) {
+async function answerCall(callId, baseUrl = config.dialpad.apiBase) {
   try {
-    // Decode the JWT and verify signature
-    const decoded = jwt.verify(signature, config.dialpad.webhookSecret, { algorithms: ['HS256'] });
-    return true;
-  } catch (error) {
-    console.error('Invalid webhook signature:', error);
-    return false;
-  }
-}
-
-/**
- * Answer an incoming call
- */
-async function answerCall(callId) {
-  try {
-    // Log the call ID for debugging
-    console.log(`Attempting to answer call with ID: ${callId}`);
-    
-    // Convert callId to string to handle both string and number types
-    const callIdStr = String(callId);
-    
-    // First, check if this is a test call
-    if (callIdStr.startsWith('test-')) {
-      console.log('Test call detected - simulating successful answer');
-      return { success: true };
-    }
-    
-    // For real calls, make the API request
-    const response = await axios.post(
-      `${DIALPAD_API_BASE}/calls/${callId}/answer`,
-      {},
-      {
-        headers: {
-          'Authorization': `Bearer ${config.dialpad.apiToken}`,
-          'Content-Type': 'application/json'
-        }
+    // Build the endpoint URL using the base URL from config
+    const url = `${baseUrl}/calls/${callId}/answer`;
+    console.log(`Answering call ${callId} via URL: ${url}`);
+    const response = await axios.post(url, {}, {
+      headers: {
+        'Authorization': `Bearer ${config.dialpad.apiToken}`,
+        'Content-Type': 'application/json'
       }
-    );
-    return response.data;
+    });
+    console.log('Answer call response:', response.data);
+    return { success: true, data: response.data };
   } catch (error) {
-    console.error('Error answering call:', error);
-    
-    // Log more debugging information
-    if (error.response) {
-      console.log('Error status:', error.response.status);
-      console.log('Error data:', error.response.data);
-    }
-    
-    // Return a dummy response instead of throwing an error
+    console.error('Error in answerCall:', error.message);
     return { success: false, error: error.message };
   }
 }
 
 /**
- * Play audio on a call
+ * Play an audio file on a call.
+ * @param {number|string} callId - The ID of the call.
+ * @param {Buffer} audioBuffer - The audio data to play.
+ * @returns {Promise<object>}
  */
 async function playAudio(callId, audioBuffer) {
   try {
-    // Convert callId to string
-    const callIdStr = String(callId);
-    
-    // Skip for test calls
-    if (callIdStr.startsWith('test-')) {
-      console.log('Test call detected - simulating successful audio playback');
-      return { success: true };
-    }
-    
-    const response = await axios.post(
-      `${DIALPAD_API_BASE}/calls/${callId}/play`,
-      audioBuffer,
-      {
-        headers: {
-          'Authorization': `Bearer ${config.dialpad.apiToken}`,
-          'Content-Type': 'audio/mp3'
-        }
+    const url = `${config.dialpad.apiBase}/calls/${callId}/play_audio`;
+    console.log(`Playing audio for call ${callId} via URL: ${url}`);
+    const response = await axios.post(url, audioBuffer, {
+      headers: {
+        'Authorization': `Bearer ${config.dialpad.apiToken}`,
+        'Content-Type': 'application/octet-stream'
       }
-    );
-    return response.data;
+    });
+    console.log('Play audio response:', response.data);
+    return { success: true, data: response.data };
   } catch (error) {
-    console.error('Error playing audio:', error);
-    
-    // Log more debugging information
-    if (error.response) {
-      console.log('Error status:', error.response.status);
-      console.log('Error data:', error.response.data);
-    }
-    
+    console.error('Error in playAudio:', error.message);
     return { success: false, error: error.message };
   }
 }
 
 /**
- * Transfer a call to another number
+ * Transfer a call to a specified number.
+ * @param {number|string} callId - The ID of the call.
+ * @param {string} targetNumber - The number to which the call should be transferred.
+ * @returns {Promise<object>}
  */
 async function transferCall(callId, targetNumber) {
   try {
-    // Convert callId to string
-    const callIdStr = String(callId);
-    
-    // Skip for test calls
-    if (callIdStr.startsWith('test-')) {
-      console.log('Test call detected - simulating successful transfer');
-      return { success: true };
-    }
-    
-    const response = await axios.post(
-      `${DIALPAD_API_BASE}/calls/${callId}/transfer`,
-      {
-        target: targetNumber
-      },
-      {
-        headers: {
-          'Authorization': `Bearer ${config.dialpad.apiToken}`,
-          'Content-Type': 'application/json'
-        }
+    const url = `${config.dialpad.apiBase}/calls/${callId}/transfer`;
+    console.log(`Transferring call ${callId} to ${targetNumber} via URL: ${url}`);
+    const response = await axios.post(url, { forward_to: targetNumber }, {
+      headers: {
+        'Authorization': `Bearer ${config.dialpad.apiToken}`,
+        'Content-Type': 'application/json'
       }
-    );
-    return response.data;
+    });
+    console.log('Transfer call response:', response.data);
+    return { success: true, data: response.data };
   } catch (error) {
-    console.error('Error transferring call:', error);
-    
-    // Log more debugging information
-    if (error.response) {
-      console.log('Error status:', error.response.status);
-      console.log('Error data:', error.response.data);
-    }
-    
+    console.error('Error in transferCall:', error.message);
     return { success: false, error: error.message };
   }
 }
 
 module.exports = {
-  validateWebhookSignature,
   answerCall,
   playAudio,
   transferCall

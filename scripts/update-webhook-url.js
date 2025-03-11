@@ -7,11 +7,10 @@ async function updateRouterUrl() {
     
     const DIALPAD_API_BASE = 'https://dialpad.com/api/v2';
     const routerId = '5983474916573184';
+    const webhookUrl = config.dialpad.webhookUrl;
     
-    // Use only the base URL without path
-    const baseUrl = config.dialpad.webhookUrl.split('/').slice(0, 3).join('/');
-    console.log(`Current full webhook URL: ${config.dialpad.webhookUrl}`);
-    console.log(`Using base URL: ${baseUrl}`);
+    console.log(`Router ID: ${routerId}`);
+    console.log(`New webhook URL: ${webhookUrl}`);
     
     const response = await axios({
       method: 'patch',
@@ -21,7 +20,7 @@ async function updateRouterUrl() {
         'Content-Type': 'application/json',
       },
       data: {
-        routing_url: baseUrl
+        routing_url: webhookUrl
       }
     });
     

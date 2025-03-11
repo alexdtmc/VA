@@ -80,10 +80,239 @@ function processJWT(req) {
   return req.body;
 }
 
-// Call routing handler to intercept calls before voicemail
+// Helper function to handle speech recognition
+async function handleSpeechRecognition(payload, callId, res) {
+  const speech = payload.speech_text || 
+               payload.transcript || 
+               (payload.data && payload.data.speech_text) ||
+               (payload.data && payload.data.transcript);
+  
+  if (!speech) {
+    return res.status(200).json({ success: true, message: 'No speech detected' });
+  }
+  
+  console.log(`Processing speech for call ID: ${callId}`);
+  console.log(`Speech content: ${speech}`);
+  
+  // Get conversation
+  const conversation = conversationManager.getConversationByAnyCallId(callId);
+  if (!conversation) {
+    console.error(`Conversation not found for call ID: ${callId}`);
+    return res.status(200).json({ success: false, error: 'Conversation not found' });
+  }
+  
+  // Add customer speech to transcript
+  conversationManager.addMessage(callId, 'customer', speech);
+  
+  // Process with OpenAI
+  const result = await openaiService.processConversation(
+    conversation.transcript, 
+    conversation.currentState,
+    conversation.customerInfo
+  );
+  
+  // Update customer info
+  const infoUpdates = {};
+  Object.keys(conversation.customerInfo).forEach(key => {
+    if (key in result && result[key]) {
+      infoUpdates[key] = result[key];
+    }
+  });
+  conversationManager.updateCustomerInfo(callId, infoUpdates);
+  
+  // Update conversation state
+  conversationManager.updateState(callId, result.newState);
+  
+  // Add assistant response to transcript
+  conversationManager.addMessage(callId, 'assistant', result.nextQuestion);
+  
+  // Convert response to speech and play it
+  try {
+    const speechBuffer = await openaiService.textToSpeech(result.nextQuestion);
+    await dialpadService.playAudio(callId, speechBuffer);
+  } catch (audioError) {
+    console.error('Error playing response audio:', audioError);
+  }
+  
+  // Check if transfer is needed
+  if (result.transferToHuman) {
+    // Save conversation for rep access
+    database.saveConversation(
+      callId,
+      conversation.transcript,
+      conversation.customerInfo
+    );
+    
+    // Play transfer message
+    try {
+      const transferMsg = "Thank you for providing that information. I'll connect you with one of our moving specialists who can help you further.";
+      const transferSpeechBuffer = await openaiService.textToSpeech(transferMsg);
+      await dialpadService.playAudio(callId, transferSpeechBuffer);
+    } catch (audioError) {
+      console.error('Error playing transfer message:', audioError);
+    }
+    
+    // Transfer call
+    try {
+      await dialpadService.transferCall(callId, config.dialpad.salesDepartmentNumber);
+    } catch (transferError) {
+      console.error('Error transferring call:', transferError);
+    }
+    
+    // Remove conversation from memory
+    conversationManager.removeConversationGraph(callId);
+  }
+  
+  return res.status(200).json({ success: true });
+}
+
+// Root path handler for Dialpad webhook
+router.post('/', async (req, res) => {
+  try {
+    console.log('Root webhook received');
+    
+    // Process JWT if necessary
+    const payload = processJWT(req);
+    
+    // Check for processing error
+    if (payload.error) {
+      console.error('Error processing payload:', payload.error);
+      return res.status(200).json({ action: "default" });
+    }
+    
+    console.log('Processed payload:', JSON.stringify(payload, null, 2));
+    
+    // Extract call ID and state
+    const callId = payload.call_id || 
+                 (payload.call && payload.call.id) || 
+                 (payload.data && payload.data.call_id) ||
+                 (payload.data && payload.data.call && payload.data.call.id);
+    
+    const callState = payload.state || null;
+    
+    console.log(`Call ID: ${callId}, State: ${callState}`);
+    
+    if (!callId) {
+      console.error('No call ID found in webhook payload');
+      return res.status(200).json({ action: "default" });
+    }
+    
+    // Handle based on call state
+    if (!callState) {
+      // This is likely a routing request
+      console.log('This appears to be a routing request');
+      
+      // Create conversation if needed
+      if (!conversationManager.getConversation(callId)) {
+        conversationManager.createConversation(callId);
+        console.log(`Created new conversation for call ID: ${callId}`);
+      }
+      
+      console.log('Responding with handle_call action');
+      return res.status(200).json({ action: "handle_call" });
+    }
+    else if (callState === 'ringing') {
+      // This is a notification that the call is ringing and ready to be answered
+      console.log('Call is ringing, sending 200 OK response first');
+      
+      // Send response immediately to acknowledge webhook
+      res.status(200).json({ success: true });
+      
+      // Then try to answer the call
+      console.log(`Attempting to answer call ${callId}...`);
+      try {
+        const answerResult = await dialpadService.answerCall(callId);
+        console.log('Answer call result:', answerResult);
+        
+        // If answer was successful, play greeting
+        if (answerResult.success !== false) {
+          console.log('Call answered successfully, playing greeting...');
+          
+          // Create conversation if needed
+          let conversation = conversationManager.getConversation(callId);
+          if (!conversation) {
+            conversation = conversationManager.createConversation(callId);
+          }
+          
+          // Play greeting
+          const greeting = "Thank you for calling The Moving Company, where we make moving easy. This is our virtual assistant. I'd be happy to help gather some information about your move. May I have your name please?";
+          
+          // Add greeting to transcript
+          conversationManager.addMessage(callId, 'assistant', greeting);
+          
+          // Generate and play speech
+          const speechBuffer = await openaiService.textToSpeech(greeting);
+          await dialpadService.playAudio(callId, speechBuffer);
+          console.log('Greeting played successfully');
+        } else {
+          console.log('Call answer unsuccessful:', answerResult);
+        }
+      } catch (answerError) {
+        console.error('Error answering call:', answerError);
+      }
+      
+      return;
+    }
+    else if (callState === 'connected') {
+      // Call is already connected
+      console.log('Call is connected');
+      res.status(200).json({ success: true });
+      
+      // Make sure we have a conversation
+      let conversation = conversationManager.getConversation(callId);
+      if (!conversation) {
+        conversation = conversationManager.createConversation(callId);
+        
+        // Play a greeting since this is a new conversation
+        const greeting = "Thank you for calling The Moving Company. I'm your virtual assistant. How can I help you with your move today?";
+        
+        // Add greeting to transcript
+        conversationManager.addMessage(callId, 'assistant', greeting);
+        
+        try {
+          const speechBuffer = await openaiService.textToSpeech(greeting);
+          await dialpadService.playAudio(callId, speechBuffer);
+        } catch (audioError) {
+          console.error('Error playing connected greeting:', audioError);
+        }
+      }
+      
+      return;
+    }
+    else if (callState === 'hangup') {
+      // Call has ended
+      console.log(`Call ${callId} has ended`);
+      
+      // Clean up conversation
+      conversationManager.removeConversation(callId);
+      
+      return res.status(200).json({ success: true });
+    }
+    else if (payload.speech_text || payload.transcript) {
+      // This is a speech recognition event
+      console.log('Speech recognition event received');
+      await handleSpeechRecognition(payload, callId, res);
+      return;
+    }
+    else {
+      // Other types of events
+      console.log(`Unhandled call state: ${callState}`);
+      return res.status(200).json({ success: true });
+    }
+  } catch (error) {
+    console.error('Error handling root webhook:', error);
+    
+    // Return success if headers not already sent
+    if (!res.headersSent) {
+      res.status(200).json({ success: false, error: error.message });
+    }
+  }
+});
+
+// Call routing handler to intercept calls before voicemail (legacy path)
 router.post('/webhook/call-routing', async (req, res) => {
   try {
-    console.log('Call routing webhook received');
+    console.log('Call routing webhook received at /webhook/call-routing');
     
     // Process JWT if necessary
     const payload = processJWT(req);
@@ -137,10 +366,10 @@ router.post('/webhook/call-routing', async (req, res) => {
   }
 });
 
-// Handle incoming calls
+// Handle incoming calls (legacy path)
 router.post('/webhook/incoming-call', async (req, res) => {
   try {
-    console.log('Incoming call webhook received');
+    console.log('Incoming call webhook received at /webhook/incoming-call');
     
     // Process JWT if necessary
     const payload = processJWT(req);
@@ -258,10 +487,10 @@ router.post('/webhook/incoming-call', async (req, res) => {
   }
 });
 
-// Handle speech recognition events
+// Handle speech recognition events (legacy path)
 router.post('/webhook/speech', async (req, res) => {
   try {
-    console.log('Speech webhook received');
+    console.log('Speech webhook received at /webhook/speech');
     
     // Process JWT if necessary
     const payload = processJWT(req);
@@ -344,69 +573,8 @@ router.post('/webhook/speech', async (req, res) => {
       return res.status(200).json({ success: true });
     }
     
-    // Add customer speech to transcript
-    conversationManager.addMessage(callId, 'customer', speech);
-    
-    // Process with OpenAI
-    const result = await openaiService.processConversation(
-      conversation.transcript, 
-      conversation.currentState,
-      conversation.customerInfo
-    );
-    
-    // Update customer info
-    const infoUpdates = {};
-    Object.keys(conversation.customerInfo).forEach(key => {
-      if (key in result && result[key]) {
-        infoUpdates[key] = result[key];
-      }
-    });
-    conversationManager.updateCustomerInfo(callId, infoUpdates);
-    
-    // Update conversation state
-    conversationManager.updateState(callId, result.newState);
-    
-    // Add assistant response to transcript
-    conversationManager.addMessage(callId, 'assistant', result.nextQuestion);
-    
-    // Convert response to speech and play it
-    try {
-      const speechBuffer = await openaiService.textToSpeech(result.nextQuestion);
-      await dialpadService.playAudio(callId, speechBuffer);
-    } catch (audioError) {
-      console.error('Error playing response audio:', audioError);
-    }
-    
-    // Check if transfer is needed
-    if (result.transferToHuman) {
-      // Save conversation for rep access
-      database.saveConversation(
-        callId,
-        conversation.transcript,
-        conversation.customerInfo
-      );
-      
-      // Play transfer message
-      try {
-        const transferMsg = "Thank you for providing that information. I'll connect you with one of our moving specialists who can help you further.";
-        const transferSpeechBuffer = await openaiService.textToSpeech(transferMsg);
-        await dialpadService.playAudio(callId, transferSpeechBuffer);
-      } catch (audioError) {
-        console.error('Error playing transfer message:', audioError);
-      }
-      
-      // Transfer call
-      try {
-        await dialpadService.transferCall(callId, config.dialpad.salesDepartmentNumber);
-      } catch (transferError) {
-        console.error('Error transferring call:', transferError);
-      }
-      
-      // Remove conversation from memory
-      conversationManager.removeConversationGraph(callId);
-    }
-    
-    res.status(200).json({ success: true });
+    // Hand off to the shared speech handling function
+    return handleSpeechRecognition(payload, callId, res);
   } catch (error) {
     console.error('Error handling speech:', error);
     // Still return success to Dialpad so it doesn't keep retrying
@@ -417,7 +585,7 @@ router.post('/webhook/speech', async (req, res) => {
 // Generic webhook endpoint for catching other webhooks
 router.post('/webhook', (req, res) => {
   try {
-    console.log('Generic webhook received');
+    console.log('Generic webhook received at /webhook');
     
     // Process JWT if necessary
     const payload = processJWT(req);
@@ -446,6 +614,14 @@ router.post('/webhook', (req, res) => {
     console.error('Error handling generic webhook:', error);
     res.status(200).json({ success: false, error: error.message });
   }
+});
+
+// Test webhook receiver
+router.post('/webhook/test', (req, res) => {
+  console.log('Test webhook received:');
+  console.log('Headers:', req.headers);
+  console.log('Body:', JSON.stringify(req.body, null, 2));
+  res.status(200).json({ received: true });
 });
 
 // Health check endpoint
