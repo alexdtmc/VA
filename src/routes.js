@@ -9,6 +9,9 @@ const conversationManager = require('./services/conversation-manager');
 const database = require('./services/database');
 const config = require('../config');
 
+// Import Twilio handler
+const twilioHandler = require('./services/twilio-handler');
+
 // Middleware to log all requests
 router.use((req, res, next) => {
   console.log(`${new Date().toISOString()} - ${req.method} ${req.url}`);
@@ -23,6 +26,15 @@ router.use((req, res, next) => {
   
   next();
 });
+
+// Twilio Voice webhook - this is where Twilio will send incoming calls
+router.post('/twilio/voice', twilioHandler.handleIncomingCall);
+
+// Webhook for speech processing
+router.post('/twilio/speech', twilioHandler.handleSpeechInput);
+
+// Webhook for call status updates
+router.post('/twilio/status', twilioHandler.handleStatusCallback);
 
 // Function to process JWT tokens
 function processJWT(req) {
@@ -126,13 +138,8 @@ async function handleSpeechRecognition(payload, callId, res) {
   // Add assistant response to transcript
   conversationManager.addMessage(callId, 'assistant', result.nextQuestion);
   
-  // Convert response to speech and play it
-  try {
-    const speechBuffer = await openaiService.textToSpeech(result.nextQuestion);
-    await dialpadService.playAudio(callId, speechBuffer);
-  } catch (audioError) {
-    console.error('Error playing response audio:', audioError);
-  }
+  // Router ID for looping the call back
+  const routerId = "5983474916573184"; // Your call router ID
   
   // Check if transfer is needed
   if (result.transferToHuman) {
@@ -143,27 +150,24 @@ async function handleSpeechRecognition(payload, callId, res) {
       conversation.customerInfo
     );
     
-    // Play transfer message
-    try {
-      const transferMsg = "Thank you for providing that information. I'll connect you with one of our moving specialists who can help you further.";
-      const transferSpeechBuffer = await openaiService.textToSpeech(transferMsg);
-      await dialpadService.playAudio(callId, transferSpeechBuffer);
-    } catch (audioError) {
-      console.error('Error playing transfer message:', audioError);
-    }
-    
-    // Transfer call
-    try {
-      await dialpadService.transferCall(callId, config.dialpad.salesDepartmentNumber);
-    } catch (transferError) {
-      console.error('Error transferring call:', transferError);
-    }
-    
-    // Remove conversation from memory
-    conversationManager.removeConversationGraph(callId);
+    // Use bridge action to transfer the call
+    return res.status(200).json({
+      action: "bridge",
+      action_target_type: "department",
+      action_target_id: config.dialpad.salesDepartmentId || config.dialpad.salesDepartmentNumber
+    });
   }
   
-  return res.status(200).json({ success: true });
+  // Return menu response with the next question and loop back to our own router
+  return res.status(200).json({
+    action: "menu",
+    menu_message: result.nextQuestion,
+    menu_options: [],  // No DTMF options, just play the response
+    menu_max_tries: 1,  // Only try once, then continue
+    menu_no_input_action: "bridge",  // After menu plays, bridge back to our router
+    menu_no_input_action_target_type: "callrouter",
+    menu_no_input_action_target_id: routerId
+  });
 }
 
 // Root path handler for Dialpad webhook
@@ -197,6 +201,9 @@ router.post('/', async (req, res) => {
       return res.status(200).json({ action: "default" });
     }
     
+    // Router ID for looping the call back
+    const routerId = "5983474916573184"; // Your call router ID
+    
     // Handle based on call state
     if (!callState) {
       // This is likely a routing request
@@ -208,76 +215,47 @@ router.post('/', async (req, res) => {
         console.log(`Created new conversation for call ID: ${callId}`);
       }
       
-      console.log('Responding with handle_call action');
-      return res.status(200).json({ action: "handle_call" });
+      // Use menu action to play a greeting AND loop back to our router
+      console.log('Responding with menu action and greeting');
+      return res.status(200).json({ 
+        action: "menu",
+        menu_message: "Thank you for calling The Moving Company, where we make moving easy. This is our virtual assistant. I'd be happy to help gather some information about your move. May I have your name please?",
+        menu_options: [],  // No DTMF options, just play the greeting
+        menu_max_tries: 1,  // Only try once, then continue
+        menu_no_input_action: "bridge",  // After menu plays, bridge back to our router
+        menu_no_input_action_target_type: "callrouter",
+        menu_no_input_action_target_id: routerId
+      });
     }
     else if (callState === 'ringing') {
-      // This is a notification that the call is ringing and ready to be answered
-      console.log('Call is ringing, sending 200 OK response first');
+      // This is a notification that the call is ringing
+      console.log('Call is ringing');
       
-      // Send response immediately to acknowledge webhook
-      res.status(200).json({ success: true });
-      
-      // Then try to answer the call
-      console.log(`Attempting to answer call ${callId}...`);
-      try {
-        const answerResult = await dialpadService.answerCall(callId);
-        console.log('Answer call result:', answerResult);
-        
-        // If answer was successful, play greeting
-        if (answerResult.success !== false) {
-          console.log('Call answered successfully, playing greeting...');
-          
-          // Create conversation if needed
-          let conversation = conversationManager.getConversation(callId);
-          if (!conversation) {
-            conversation = conversationManager.createConversation(callId);
-          }
-          
-          // Play greeting
-          const greeting = "Thank you for calling The Moving Company, where we make moving easy. This is our virtual assistant. I'd be happy to help gather some information about your move. May I have your name please?";
-          
-          // Add greeting to transcript
-          conversationManager.addMessage(callId, 'assistant', greeting);
-          
-          // Generate and play speech
-          const speechBuffer = await openaiService.textToSpeech(greeting);
-          await dialpadService.playAudio(callId, speechBuffer);
-          console.log('Greeting played successfully');
-        } else {
-          console.log('Call answer unsuccessful:', answerResult);
-        }
-      } catch (answerError) {
-        console.error('Error answering call:', answerError);
-      }
-      
-      return;
+      // Just acknowledge the ringing state
+      return res.status(200).json({ success: true });
     }
     else if (callState === 'connected') {
       // Call is already connected
       console.log('Call is connected');
-      res.status(200).json({ success: true });
       
       // Make sure we have a conversation
       let conversation = conversationManager.getConversation(callId);
       if (!conversation) {
         conversation = conversationManager.createConversation(callId);
         
-        // Play a greeting since this is a new conversation
-        const greeting = "Thank you for calling The Moving Company. I'm your virtual assistant. How can I help you with your move today?";
-        
-        // Add greeting to transcript
-        conversationManager.addMessage(callId, 'assistant', greeting);
-        
-        try {
-          const speechBuffer = await openaiService.textToSpeech(greeting);
-          await dialpadService.playAudio(callId, speechBuffer);
-        } catch (audioError) {
-          console.error('Error playing connected greeting:', audioError);
-        }
+        // Return a menu response with a greeting and loop back
+        return res.status(200).json({
+          action: "menu",
+          menu_message: "Thank you for calling The Moving Company. I'm your virtual assistant. How can I help you with your move today?",
+          menu_options: [],
+          menu_max_tries: 1,
+          menu_no_input_action: "bridge",
+          menu_no_input_action_target_type: "callrouter",
+          menu_no_input_action_target_id: routerId
+        });
       }
       
-      return;
+      return res.status(200).json({ success: true });
     }
     else if (callState === 'hangup') {
       // Call has ended
@@ -291,8 +269,21 @@ router.post('/', async (req, res) => {
     else if (payload.speech_text || payload.transcript) {
       // This is a speech recognition event
       console.log('Speech recognition event received');
-      await handleSpeechRecognition(payload, callId, res);
-      return;
+      return handleSpeechRecognition(payload, callId, res);
+    }
+    else if (callState === 'recap_summary') {
+      // This is a recap summary event (speech recognition)
+      console.log('Recap summary event received');
+      
+      // Extract the transcript or speech content
+      const transcript = payload.recap_summary || payload.transcription_text;
+      if (transcript) {
+        // Add it to our payload and process as speech
+        payload.speech_text = transcript;
+        return handleSpeechRecognition(payload, callId, res);
+      }
+      
+      return res.status(200).json({ success: true });
     }
     else {
       // Other types of events
@@ -351,13 +342,19 @@ router.post('/webhook/call-routing', async (req, res) => {
       console.log(`Created new conversation for call ID: ${callId}`);
     }
     
-    // Log the action being taken
-    console.log('Requesting to handle the call directly with action: handle_call');
+    // Router ID for looping the call back
+    const routerId = "5983474916573184"; // Your call router ID
     
-    // Return a routing decision to handle the call yourself
-    // This tells Dialpad not to send to voicemail
+    // Return a menu action to play a greeting with loop back
+    console.log('Responding with menu action');
     return res.status(200).json({
-      action: "handle_call"
+      action: "menu",
+      menu_message: "Thank you for calling The Moving Company, where we make moving easy. This is our virtual assistant. I'd be happy to help gather some information about your move. May I have your name please?",
+      menu_options: [],
+      menu_max_tries: 1,
+      menu_no_input_action: "bridge",
+      menu_no_input_action_target_type: "callrouter",
+      menu_no_input_action_target_id: routerId
     });
   } catch (error) {
     console.error('Error handling call routing:', error);
@@ -399,9 +396,12 @@ router.post('/webhook/incoming-call', async (req, res) => {
     
     console.log(`Processing call with ID: ${callId} in state: ${payload.state}`);
     
+    // Router ID for looping the call back
+    const routerId = "5983474916573184"; // Your call router ID
+    
     // Handle different call states
     if (payload.state === 'ringing') {
-      console.log('Call is ringing, attempting to answer');
+      console.log('Call is ringing');
       
       // Create new conversation or link to existing one in the call graph
       let conversation = conversationManager.getConversationByAnyCallId(callId);
@@ -409,25 +409,16 @@ router.post('/webhook/incoming-call', async (req, res) => {
         conversation = conversationManager.createConversation(callId, masterCallId, entryPointCallId, operatorCallId);
       }
       
-      // Try to answer the call
-      const answerResult = await dialpadService.answerCall(callId);
-      console.log('Answer call result:', answerResult);
-      
-      // Play greeting if answer was successful
-      if (answerResult.success !== false) {
-        const greeting = "Thank you for calling The Moving Company, where we make moving easy. This is our virtual assistant. I'd be happy to help gather some information about your move. May I have your name please?";
-        
-        // Add greeting to transcript
-        conversationManager.addMessage(callId, 'assistant', greeting);
-        
-        // Try to play the greeting
-        try {
-          const speechBuffer = await openaiService.textToSpeech(greeting);
-          await dialpadService.playAudio(callId, speechBuffer);
-        } catch (audioError) {
-          console.error('Error playing greeting audio:', audioError);
-        }
-      }
+      // Return a menu response instead of trying to answer, with loop back
+      return res.status(200).json({
+        action: "menu",
+        menu_message: "Thank you for calling The Moving Company, where we make moving easy. This is our virtual assistant. I'd be happy to help gather some information about your move. May I have your name please?",
+        menu_options: [],
+        menu_max_tries: 1,
+        menu_no_input_action: "bridge",
+        menu_no_input_action_target_type: "callrouter",
+        menu_no_input_action_target_id: routerId
+      });
     } else if (payload.state === 'hangup') {
       // Call has already ended, just log information
       console.log(`Call ${callId} has already ended, details:`, {
@@ -443,7 +434,6 @@ router.post('/webhook/incoming-call', async (req, res) => {
         conversationManager.removeConversationGraph(callId);
       }
       
-      // Don't try to answer or play audio on ended calls
       return res.status(200).json({ 
         success: true, 
         message: 'Call already ended',
@@ -456,30 +446,27 @@ router.post('/webhook/incoming-call', async (req, res) => {
       let conversation = conversationManager.getConversationByAnyCallId(callId);
       if (conversation) {
         console.log(`Continuing existing conversation for call ID ${callId}`);
+        return res.status(200).json({ success: true });
       } else {
         // Create a new conversation if one doesn't exist
         console.log(`Creating new conversation for connected call ID ${callId}`);
         conversation = conversationManager.createConversation(callId, masterCallId, entryPointCallId, operatorCallId);
         
-        // Greet the user
-        const greeting = "Thank you for calling The Moving Company. I'm your virtual assistant. How can I help you with your move today?";
-        
-        // Add greeting to transcript
-        conversationManager.addMessage(callId, 'assistant', greeting);
-        
-        // Try to play the greeting
-        try {
-          const speechBuffer = await openaiService.textToSpeech(greeting);
-          await dialpadService.playAudio(callId, speechBuffer);
-        } catch (audioError) {
-          console.error('Error playing greeting audio:', audioError);
-        }
+        // Return a menu response with loop back
+        return res.status(200).json({
+          action: "menu",
+          menu_message: "Thank you for calling The Moving Company. I'm your virtual assistant. How can I help you with your move today?",
+          menu_options: [],
+          menu_max_tries: 1,
+          menu_no_input_action: "bridge",
+          menu_no_input_action_target_type: "callrouter",
+          menu_no_input_action_target_id: routerId
+        });
       }
     } else {
       console.log(`Call is in ${payload.state} state, not taking specific action`);
+      return res.status(200).json({ success: true });
     }
-    
-    res.status(200).json({ success: true });
   } catch (error) {
     console.error('Error handling incoming call:', error);
     // Still return success to Dialpad so it doesn't keep retrying
@@ -535,6 +522,9 @@ router.post('/webhook/speech', async (req, res) => {
       });
     }
     
+    // Router ID for looping the call back
+    const routerId = "5983474916573184"; // Your call router ID
+    
     // Get conversation - check for any related calls in the call graph
     const conversation = conversationManager.getConversationByAnyCallId(callId);
     if (!conversation) {
@@ -562,15 +552,16 @@ router.post('/webhook/speech', async (req, res) => {
       // Add assistant response to transcript
       conversationManager.addMessage(callId, 'assistant', response);
       
-      // Play response
-      try {
-        const speechBuffer = await openaiService.textToSpeech(response);
-        await dialpadService.playAudio(callId, speechBuffer);
-      } catch (audioError) {
-        console.error('Error playing response audio:', audioError);
-      }
-      
-      return res.status(200).json({ success: true });
+      // Return menu response with loop back
+      return res.status(200).json({
+        action: "menu",
+        menu_message: response,
+        menu_options: [],
+        menu_max_tries: 1,
+        menu_no_input_action: "bridge",
+        menu_no_input_action_target_type: "callrouter",
+        menu_no_input_action_target_id: routerId
+      });
     }
     
     // Hand off to the shared speech handling function

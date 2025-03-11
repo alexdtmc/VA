@@ -1,5 +1,5 @@
 const axios = require('axios');
-const config = require('../config'); // Ensure this file exists as shown above
+const config = require('../../config');
 
 /**
  * Answer an incoming call via the Dialpad API.
@@ -7,9 +7,9 @@ const config = require('../config'); // Ensure this file exists as shown above
  * @param {string} [baseUrl=config.dialpad.apiBase] - The base URL for the API.
  * @returns {Promise<object>} - An object indicating success or failure.
  */
-async function answerCall(callId, baseUrl = config.dialpad.apiBase) {
+async function answerCall(callId, baseUrl = 'https://dialpad.com/api/v2') {
   try {
-    // Build the endpoint URL using the base URL from config
+    // Build the endpoint URL using the corrected base URL
     const url = `${baseUrl}/calls/${callId}/answer`;
     console.log(`Answering call ${callId} via URL: ${url}`);
     const response = await axios.post(url, {}, {
@@ -34,7 +34,8 @@ async function answerCall(callId, baseUrl = config.dialpad.apiBase) {
  */
 async function playAudio(callId, audioBuffer) {
   try {
-    const url = `${config.dialpad.apiBase}/calls/${callId}/play_audio`;
+    const baseUrl = 'https://dialpad.com/api/v2';
+    const url = `${baseUrl}/calls/${callId}/play_audio`;
     console.log(`Playing audio for call ${callId} via URL: ${url}`);
     const response = await axios.post(url, audioBuffer, {
       headers: {
@@ -58,7 +59,8 @@ async function playAudio(callId, audioBuffer) {
  */
 async function transferCall(callId, targetNumber) {
   try {
-    const url = `${config.dialpad.apiBase}/calls/${callId}/transfer`;
+    const baseUrl = 'https://dialpad.com/api/v2';
+    const url = `${baseUrl}/calls/${callId}/transfer`;
     console.log(`Transferring call ${callId} to ${targetNumber} via URL: ${url}`);
     const response = await axios.post(url, { forward_to: targetNumber }, {
       headers: {

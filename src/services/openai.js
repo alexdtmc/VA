@@ -1,5 +1,5 @@
 const { OpenAI } = require('openai');
-const config = require('../../config');
+const config = require('../../config'); // Updated path
 
 // Initialize OpenAI
 const openai = new OpenAI({

@@ -1,6 +1,8 @@
 const express = require('express');
-const config = require('../config');
+const config = require('../config'); // Already correct path since server.js is in src/
 const routes = require('./routes');
+
+// ... rest of the file remains unchanged ...
 
 // Initialize Express app
 const app = express();

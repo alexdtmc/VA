@@ -12,12 +12,12 @@ async function listWebhooks() {
       {
         headers: {
           'Authorization': `Bearer ${config.dialpad.apiToken}`,
-          'Content-Type': 'application/json'
+          'Accept': 'application/json'
         }
       }
     );
     
-    const webhooks = response.data.webhooks || [];
+    const webhooks = response.data.items || [];
     console.log(`Found ${webhooks.length} webhooks:\n`);
     
     if (webhooks.length === 0) {
@@ -25,9 +25,8 @@ async function listWebhooks() {
     } else {
       webhooks.forEach(webhook => {
         console.log(`ID: ${webhook.id}`);
-        console.log(`Name: ${webhook.name}`);
         console.log(`URL: ${webhook.hook_url}`);
-        console.log(`Events: ${webhook.subscriptions?.join(', ')}`);
+        console.log(`Subscriptions: ${webhook.subscriptions ? webhook.subscriptions.join(', ') : 'N/A'}`);
         console.log('-------------------');
       });
     }
@@ -41,12 +40,12 @@ async function listWebhooks() {
         {
           headers: {
             'Authorization': `Bearer ${config.dialpad.apiToken}`,
-            'Content-Type': 'application/json'
+            'Accept': 'application/json'
           }
         }
       );
       
-      const routers = routersResponse.data.routers || [];
+      const routers = routersResponse.data.items || [];
       console.log(`Found ${routers.length} call routers:\n`);
       
       if (routers.length === 0) {
@@ -54,16 +53,16 @@ async function listWebhooks() {
       } else {
         routers.forEach(router => {
           console.log(`ID: ${router.id}`);
-          console.log(`Name: ${router.name}`);
+          console.log(`Name: ${router.name || 'N/A'}`);
           console.log(`Enabled: ${router.enabled}`);
-          console.log(`Webhook ID: ${router.webhook_id}`);
+          console.log(`Webhook URL: ${router.routing_url}`);
+          console.log(`Phone numbers: ${router.phone_numbers ? router.phone_numbers.join(', ') : 'None'}`);
           console.log('-------------------');
         });
       }
     } catch (routerError) {
       console.error('Error fetching call routers:', routerError.message);
     }
-    
   } catch (error) {
     console.error('Error fetching webhooks:', error.message);
     
